@@ -123,3 +123,56 @@ export const insertAlertConfigSchema = z.object({
 
 export type InsertWatchlistItem = z.infer<typeof insertWatchlistItemSchema>;
 export type InsertAlertConfig = z.infer<typeof insertAlertConfigSchema>;
+
+// ── Mispricing Detection Types ──────────────────────────────────
+export interface MispricingOutcome {
+  name: string;
+  midPrice: number;
+  bestBid: number;
+  bestAsk: number;
+  spread: number;
+  tokenId: string;
+}
+
+export interface MispricingOpportunity {
+  id: string;
+  eventId: string;
+  eventTitle: string;
+  eventSlug?: string;
+  type: "probability_sum" | "binary_deviation" | "spread_arb";
+
+  // Core metrics
+  rawEdge: number;
+  effectiveEdge: number;
+  spreadCost: number;
+  probabilitySum: number;
+
+  // Market details
+  outcomes: MispricingOutcome[];
+
+  // Scoring
+  score: number;
+  liquidity: number;
+  volume24h: number;
+
+  // Time
+  endDate?: string;
+  hoursToExpiry?: number;
+  timeUrgency: "critical" | "high" | "medium" | "low";
+
+  // Execution estimate
+  estimatedSlippage100: number;
+  estimatedSlippage500: number;
+
+  // Meta
+  detectedAt: string;
+  polymarketUrl: string;
+}
+
+export interface MispricingStats {
+  totalMispricings: number;
+  averageEdge: number;
+  bestEdge: number;
+  totalExploitableVolume: number;
+  marketsScanned: number;
+}

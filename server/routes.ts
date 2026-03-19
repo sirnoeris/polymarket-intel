@@ -2,7 +2,7 @@ import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import { insertWatchlistItemSchema, insertAlertConfigSchema } from "@shared/schema";
-import type { PolymarketEvent, PolymarketMarket, MarketInsight, DailyReport } from "@shared/schema";
+import type { PolymarketEvent, PolymarketMarket, MarketInsight, DailyReport, MispricingOpportunity, MispricingStats } from "@shared/schema";
 import { randomUUID } from "crypto";
 
 const GAMMA_API = "https://gamma-api.polymarket.com";
@@ -47,6 +47,455 @@ function parseOutcomes(market: PolymarketMarket) {
   } catch {
     return [];
   }
+}
+
+function parseClobTokenIds(market: PolymarketMarket): string[] {
+  try {
+    return JSON.parse(market.clobTokenIds || "[]");
+  } catch {
+    return [];
+  }
+}
+
+async function batchFetchMidpoints(tokenIds: string[]): Promise<Record<string, number>> {
+  const results: Record<string, number> = {};
+  if (tokenIds.length === 0) return results;
+
+  // Batch in chunks of 100 to avoid overloading
+  const chunks: string[][] = [];
+  for (let i = 0; i < tokenIds.length; i += 100) {
+    chunks.push(tokenIds.slice(i, i + 100));
+  }
+
+  for (const chunk of chunks) {
+    try {
+      const body = chunk.map((token_id) => ({ token_id }));
+      const res = await fetch(`${CLOB_API}/midpoints`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        // Response is Record<tokenId, midpoint string>
+        for (const [tokenId, mid] of Object.entries(data)) {
+          results[tokenId] = parseFloat(mid as string) || 0;
+        }
+      }
+    } catch {
+      // Continue with what we have
+    }
+  }
+  return results;
+}
+
+async function batchFetchSpreads(tokenIds: string[]): Promise<Record<string, number>> {
+  const results: Record<string, number> = {};
+  if (tokenIds.length === 0) return results;
+
+  const chunks: string[][] = [];
+  for (let i = 0; i < tokenIds.length; i += 100) {
+    chunks.push(tokenIds.slice(i, i + 100));
+  }
+
+  for (const chunk of chunks) {
+    try {
+      const body = chunk.map((token_id) => ({ token_id }));
+      const res = await fetch(`${CLOB_API}/spreads`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        for (const [tokenId, spread] of Object.entries(data)) {
+          results[tokenId] = parseFloat(spread as string) || 0;
+        }
+      }
+    } catch {
+      // Continue
+    }
+  }
+  return results;
+}
+
+async function fetchOrderbookDepth(tokenId: string): Promise<{ slippage100: number; slippage500: number }> {
+  try {
+    const data = await fetchClob("/book", { token_id: tokenId });
+    const asks = (data.asks || []) as Array<{ price: string; size: string }>;
+    
+    function calcSlippage(targetAmount: number): number {
+      let remaining = targetAmount;
+      let totalCost = 0;
+      for (const level of asks) {
+        const price = parseFloat(level.price);
+        const size = parseFloat(level.size);
+        const levelValue = price * size;
+        if (remaining <= levelValue) {
+          totalCost += remaining;
+          remaining = 0;
+          break;
+        }
+        totalCost += levelValue;
+        remaining -= levelValue;
+      }
+      if (remaining > 0) return 0.1; // Not enough depth
+      const avgPrice = totalCost / targetAmount;
+      const midPrice = asks.length > 0 ? parseFloat(asks[0].price) : avgPrice;
+      return Math.max(0, avgPrice - midPrice);
+    }
+
+    return {
+      slippage100: calcSlippage(100),
+      slippage500: calcSlippage(500),
+    };
+  } catch {
+    return { slippage100: 0, slippage500: 0 };
+  }
+}
+
+function getTimeUrgency(endDate?: string): { urgency: "critical" | "high" | "medium" | "low"; hoursToExpiry?: number } {
+  if (!endDate) return { urgency: "low" };
+  const now = Date.now();
+  const end = new Date(endDate).getTime();
+  const hoursToExpiry = Math.max(0, (end - now) / (1000 * 60 * 60));
+  
+  if (hoursToExpiry <= 24) return { urgency: "critical", hoursToExpiry };
+  if (hoursToExpiry <= 72) return { urgency: "high", hoursToExpiry };
+  if (hoursToExpiry <= 168) return { urgency: "medium", hoursToExpiry };
+  return { urgency: "low", hoursToExpiry };
+}
+
+/**
+ * Classify whether a multi-market event has mutually exclusive outcomes.
+ * Mutually exclusive = exactly one outcome wins (e.g. "Who wins the election?").
+ * NOT mutually exclusive = independent markets grouped under one event
+ * (e.g. player props, bracketed thresholds like "BTC above 60k/62k/64k").
+ *
+ * Heuristics:
+ * 1. If all markets are binary Yes/No and their Yes prices roughly sum to ~1.0 (0.7–1.5),
+ *    they're likely mutually exclusive options.
+ * 2. If outcomes have ascending numeric patterns (thresholds), they're cumulative — NOT exclusive.
+ * 3. If outcomes contain independent player/stat markets, they're NOT exclusive.
+ * 4. If probabilities sum to >2.0 or <0.3, they're clearly NOT exclusive outcomes.
+ */
+function classifyEventOutcomes(markets: PolymarketMarket[]): "mutually_exclusive" | "independent" | "cumulative" {
+  if (markets.length < 2) return "independent";
+
+  // Get Yes prices for all markets
+  const yesPrices: number[] = [];
+  const names: string[] = [];
+  for (const m of markets) {
+    const parsed = parseOutcomes(m);
+    const yesP = parsed.find((p: any) => p.name === "Yes")?.price ?? parsed[0]?.price ?? 0;
+    yesPrices.push(yesP);
+    names.push(m.groupItemTitle || m.question || "");
+  }
+
+  // Check for cumulative/threshold patterns ("above 60k", "above 62k", etc.)
+  // These have descending probabilities (higher threshold = lower probability)
+  const numericPattern = /(?:above|over|under|below|more than|less than|at least|\d+[\.,]?\d*)/i;
+  const hasNumericPattern = names.filter(n => numericPattern.test(n)).length > markets.length * 0.5;
+  if (hasNumericPattern) {
+    // Check if prices are monotonically decreasing/increasing (cumulative distribution)
+    let monotoneDecreasing = true;
+    let monotoneIncreasing = true;
+    for (let i = 1; i < yesPrices.length; i++) {
+      if (yesPrices[i] > yesPrices[i - 1] + 0.05) monotoneDecreasing = false;
+      if (yesPrices[i] < yesPrices[i - 1] - 0.05) monotoneIncreasing = false;
+    }
+    if (monotoneDecreasing || monotoneIncreasing) return "cumulative";
+  }
+
+  // Check for independent player props ("Player: Stat O/U X.5" patterns)
+  const playerPropPattern = /(?:O\/U|over\/under|points|rebounds|assists|goals|saves|strikeouts|tackles|yards|completions|interceptions)/i;
+  const playerPropCount = names.filter(n => playerPropPattern.test(n)).length;
+  if (playerPropCount > markets.length * 0.3) return "independent";
+
+  // Check for half/quarter/period sub-markets mixed with player props
+  const periodPattern = /(?:1H|2H|1Q|2Q|3Q|4Q|half|quarter|period|spread|total|O\/U)/i;
+  const periodCount = names.filter(n => periodPattern.test(n)).length;
+  if (periodCount > markets.length * 0.3 && markets.length > 5) return "independent";
+
+  // Sum check: mutually exclusive outcomes should sum to roughly 1.0
+  const probSum = yesPrices.reduce((s, p) => s + p, 0);
+
+  // If sum is wildly off (>2.0 or <0.3), these aren't exclusive
+  if (probSum > 2.0 || probSum < 0.3) return "independent";
+
+  // Reasonable range for mutually exclusive outcomes (0.7 to 1.5)
+  if (probSum >= 0.7 && probSum <= 1.5) return "mutually_exclusive";
+
+  return "independent";
+}
+
+async function detectMispricings(events: PolymarketEvent[]): Promise<MispricingOpportunity[]> {
+  // Collect all token IDs across all markets
+  const allTokenIds: string[] = [];
+  const tokenToMarketEvent: Map<string, { market: PolymarketMarket; event: PolymarketEvent; index: number }> = new Map();
+
+  for (const event of events) {
+    if (!event.markets) continue;
+    for (const market of event.markets) {
+      if (market.closed) continue;
+      const tokenIds = parseClobTokenIds(market);
+      tokenIds.forEach((tid, idx) => {
+        allTokenIds.push(tid);
+        tokenToMarketEvent.set(tid, { market, event, index: idx });
+      });
+    }
+  }
+
+  // Batch fetch midpoints and spreads
+  const [midpoints, spreads] = await Promise.all([
+    batchFetchMidpoints(allTokenIds),
+    batchFetchSpreads(allTokenIds),
+  ]);
+
+  const opportunities: MispricingOpportunity[] = [];
+
+  // Analyze each event for mispricings
+  for (const event of events) {
+    if (!event.markets) continue;
+
+    const eventMarkets = event.markets.filter((m) => !m.closed);
+    if (eventMarkets.length === 0) continue;
+
+    if (eventMarkets.length > 1) {
+      // Multi-market event — classify the outcome structure first
+      const classification = classifyEventOutcomes(eventMarkets);
+
+      if (classification === "mutually_exclusive") {
+        // PROBABILITY SUM DEVIATION — only valid for mutually exclusive outcomes
+        let probSum = 0;
+        let totalSpreadCost = 0;
+        const outcomeDetails: MispricingOpportunity["outcomes"] = [];
+        let totalLiquidity = 0;
+        let totalVolume24h = 0;
+        let hasData = false;
+
+        for (const market of eventMarkets) {
+          const tokenIds = parseClobTokenIds(market);
+          const yesTokenId = tokenIds[0];
+          if (!yesTokenId) continue;
+
+          const mid = midpoints[yesTokenId];
+          const spread = spreads[yesTokenId] || market.spread || 0;
+
+          if (mid !== undefined && mid > 0) {
+            hasData = true;
+            probSum += mid;
+            totalSpreadCost += spread;
+            totalLiquidity += parseFloat(String(market.liquidity || 0)) || 0;
+            totalVolume24h += parseFloat(String(market.volume24hr || 0)) || 0;
+
+            outcomeDetails.push({
+              name: market.groupItemTitle || market.question,
+              midPrice: mid,
+              bestBid: Math.max(0, mid - spread / 2),
+              bestAsk: Math.min(1, mid + spread / 2),
+              spread,
+              tokenId: yesTokenId,
+            });
+          }
+        }
+
+        if (!hasData || outcomeDetails.length < 2) continue;
+
+        const rawEdge = Math.abs(1.0 - probSum);
+        const effectiveEdge = Math.max(0, rawEdge - totalSpreadCost);
+
+        if (rawEdge >= 0.01) {
+          const { urgency, hoursToExpiry } = getTimeUrgency(event.endDate);
+          const timeWeight = urgency === "critical" ? 2.0 : urgency === "high" ? 1.5 : urgency === "medium" ? 1.2 : 1.0;
+          const volumeFactor = totalVolume24h > 0 ? Math.min(1.5, 0.5 + Math.log10(totalVolume24h) / 10) : 0.5;
+          const liquidityScore = totalLiquidity > 0 ? Math.log(totalLiquidity) : 0;
+          const score = effectiveEdge * liquidityScore * volumeFactor * timeWeight * 1000;
+
+          opportunities.push({
+            id: randomUUID(),
+            eventId: event.id,
+            eventTitle: event.title,
+            eventSlug: event.slug,
+            type: "probability_sum",
+            rawEdge,
+            effectiveEdge,
+            spreadCost: totalSpreadCost,
+            probabilitySum: probSum,
+            outcomes: outcomeDetails,
+            score,
+            liquidity: totalLiquidity,
+            volume24h: totalVolume24h,
+            endDate: event.endDate,
+            hoursToExpiry,
+            timeUrgency: urgency,
+            estimatedSlippage100: 0,
+            estimatedSlippage500: 0,
+            detectedAt: new Date().toISOString(),
+            polymarketUrl: `https://polymarket.com/event/${event.slug || event.id}`,
+          });
+        }
+      } else {
+        // Independent or cumulative markets — check each binary market individually
+        for (const market of eventMarkets) {
+          const tokenIds = parseClobTokenIds(market);
+          if (tokenIds.length < 2) continue;
+
+          const yesMid = midpoints[tokenIds[0]];
+          const noMid = midpoints[tokenIds[1]];
+          const yesSpread = spreads[tokenIds[0]] || market.spread || 0;
+          const noSpread = spreads[tokenIds[1]] || market.spread || 0;
+
+          if (yesMid === undefined || noMid === undefined) continue;
+          if (yesMid <= 0 && noMid <= 0) continue;
+
+          const probSum = yesMid + noMid;
+          const rawEdge = Math.abs(1.0 - probSum);
+          const totalSpread = yesSpread + noSpread;
+          const effectiveEdge = Math.max(0, rawEdge - totalSpread);
+
+          // Higher threshold for individual binary markets (2% min) to reduce noise
+          if (rawEdge >= 0.02 && effectiveEdge > 0) {
+            const liq = parseFloat(String(market.liquidity || 0)) || 0;
+            const vol = parseFloat(String(market.volume24hr || 0)) || 0;
+            // Skip very low liquidity markets (likely stale/illiquid)
+            if (liq < 500 && vol < 1000) continue;
+
+            const { urgency, hoursToExpiry } = getTimeUrgency(market.endDate || event.endDate);
+            const timeWeight = urgency === "critical" ? 2.0 : urgency === "high" ? 1.5 : urgency === "medium" ? 1.2 : 1.0;
+            const volumeFactor = vol > 0 ? Math.min(1.5, 0.5 + Math.log10(vol) / 10) : 0.5;
+            const liquidityScore = liq > 0 ? Math.log(liq) : 0;
+            const score = effectiveEdge * liquidityScore * volumeFactor * timeWeight * 1000;
+
+            opportunities.push({
+              id: randomUUID(),
+              eventId: event.id,
+              eventTitle: event.title + " — " + (market.groupItemTitle || market.question),
+              eventSlug: event.slug,
+              type: "binary_deviation",
+              rawEdge,
+              effectiveEdge,
+              spreadCost: totalSpread,
+              probabilitySum: probSum,
+              outcomes: [
+                {
+                  name: "Yes",
+                  midPrice: yesMid,
+                  bestBid: Math.max(0, yesMid - yesSpread / 2),
+                  bestAsk: Math.min(1, yesMid + yesSpread / 2),
+                  spread: yesSpread,
+                  tokenId: tokenIds[0],
+                },
+                {
+                  name: "No",
+                  midPrice: noMid,
+                  bestBid: Math.max(0, noMid - noSpread / 2),
+                  bestAsk: Math.min(1, noMid + noSpread / 2),
+                  spread: noSpread,
+                  tokenId: tokenIds[1],
+                },
+              ],
+              score,
+              liquidity: liq,
+              volume24h: vol,
+              endDate: market.endDate || event.endDate,
+              hoursToExpiry,
+              timeUrgency: urgency,
+              estimatedSlippage100: 0,
+              estimatedSlippage500: 0,
+              detectedAt: new Date().toISOString(),
+              polymarketUrl: `https://polymarket.com/event/${event.slug || event.id}`,
+            });
+          }
+        }
+      }
+    } else {
+      // Single binary market under the event
+      const market = eventMarkets[0];
+      const tokenIds = parseClobTokenIds(market);
+      if (tokenIds.length < 2) continue;
+
+      const yesMid = midpoints[tokenIds[0]];
+      const noMid = midpoints[tokenIds[1]];
+      const yesSpread = spreads[tokenIds[0]] || market.spread || 0;
+      const noSpread = spreads[tokenIds[1]] || market.spread || 0;
+
+      if (yesMid === undefined || noMid === undefined) continue;
+      if (yesMid <= 0 && noMid <= 0) continue;
+
+      const probSum = yesMid + noMid;
+      const rawEdge = Math.abs(1.0 - probSum);
+      const totalSpread = yesSpread + noSpread;
+      const effectiveEdge = Math.max(0, rawEdge - totalSpread);
+
+      if (rawEdge >= 0.02 && effectiveEdge > 0) {
+        const liq = parseFloat(String(market.liquidity || 0)) || 0;
+        const vol = parseFloat(String(market.volume24hr || 0)) || 0;
+        if (liq < 500 && vol < 1000) continue;
+
+        const { urgency, hoursToExpiry } = getTimeUrgency(market.endDate || event.endDate);
+        const timeWeight = urgency === "critical" ? 2.0 : urgency === "high" ? 1.5 : urgency === "medium" ? 1.2 : 1.0;
+        const volumeFactor = vol > 0 ? Math.min(1.5, 0.5 + Math.log10(vol) / 10) : 0.5;
+        const liquidityScore = liq > 0 ? Math.log(liq) : 0;
+        const score = effectiveEdge * liquidityScore * volumeFactor * timeWeight * 1000;
+
+        opportunities.push({
+          id: randomUUID(),
+          eventId: event.id,
+          eventTitle: event.title,
+          eventSlug: event.slug,
+          type: "binary_deviation",
+          rawEdge,
+          effectiveEdge,
+          spreadCost: totalSpread,
+          probabilitySum: probSum,
+          outcomes: [
+            {
+              name: "Yes",
+              midPrice: yesMid,
+              bestBid: Math.max(0, yesMid - yesSpread / 2),
+              bestAsk: Math.min(1, yesMid + yesSpread / 2),
+              spread: yesSpread,
+              tokenId: tokenIds[0],
+            },
+            {
+              name: "No",
+              midPrice: noMid,
+              bestBid: Math.max(0, noMid - noSpread / 2),
+              bestAsk: Math.min(1, noMid + noSpread / 2),
+              spread: noSpread,
+              tokenId: tokenIds[1],
+            },
+          ],
+          score,
+          liquidity: liq,
+          volume24h: vol,
+          endDate: market.endDate || event.endDate,
+          hoursToExpiry,
+          timeUrgency: urgency,
+          estimatedSlippage100: 0,
+          estimatedSlippage500: 0,
+          detectedAt: new Date().toISOString(),
+          polymarketUrl: `https://polymarket.com/event/${event.slug || event.id}`,
+        });
+      }
+    }
+  }
+
+  // Sort by score descending
+  opportunities.sort((a, b) => b.score - a.score);
+
+  // Fetch orderbook depth for top 5
+  const topN = opportunities.slice(0, 5);
+  for (const opp of topN) {
+    if (opp.outcomes.length > 0) {
+      const { slippage100, slippage500 } = await fetchOrderbookDepth(opp.outcomes[0].tokenId);
+      opp.estimatedSlippage100 = slippage100;
+      opp.estimatedSlippage500 = slippage500;
+    }
+  }
+
+  return opportunities;
 }
 
 function analyzeMarket(event: PolymarketEvent, market: PolymarketMarket): MarketInsight | null {
@@ -438,6 +887,88 @@ export async function registerRoutes(
     try {
       await storage.deleteAlert(req.params.id);
       res.json({ deleted: true });
+    } catch (e: any) {
+      res.status(422).json({ error: e.message });
+    }
+  });
+
+  // ── Mispricing Detection ────────────────────────────────────
+  app.get("/api/mispricings", async (_req, res) => {
+    try {
+      const cacheKey = "mispricings";
+      let data = getCached(cacheKey);
+      if (!data) {
+        const events = await fetchGamma("/events", {
+          active: "true",
+          closed: "false",
+          limit: "100",
+          order: "volume24hr",
+          ascending: "false",
+        }) as PolymarketEvent[];
+
+        data = await detectMispricings(events);
+        await storage.saveMispricings(data);
+        setCache(cacheKey, data, 30_000); // 30s cache
+      }
+      res.json(data);
+    } catch (e: any) {
+      res.status(422).json({ error: e.message });
+    }
+  });
+
+  app.post("/api/mispricings/refresh", async (_req, res) => {
+    try {
+      cache.delete("mispricings"); // Force bust cache
+      const events = await fetchGamma("/events", {
+        active: "true",
+        closed: "false",
+        limit: "100",
+        order: "volume24hr",
+        ascending: "false",
+      }) as PolymarketEvent[];
+
+      const data = await detectMispricings(events);
+      await storage.saveMispricings(data);
+      setCache("mispricings", data, 30_000);
+      res.json(data);
+    } catch (e: any) {
+      res.status(422).json({ error: e.message });
+    }
+  });
+
+  app.get("/api/mispricings/stats", async (_req, res) => {
+    try {
+      // Try cache first, then storage, then trigger a fresh scan
+      let mispricings = getCached("mispricings") as MispricingOpportunity[] | null;
+      if (!mispricings || mispricings.length === 0) {
+        mispricings = await storage.getMispricings();
+      }
+      if (!mispricings || mispricings.length === 0) {
+        // Trigger a scan so stats are populated on first load
+        const events = await fetchGamma("/events", {
+          active: "true",
+          closed: "false",
+          limit: "100",
+          order: "volume24hr",
+          ascending: "false",
+        }) as PolymarketEvent[];
+        mispricings = await detectMispricings(events);
+        await storage.saveMispricings(mispricings);
+        setCache("mispricings", mispricings, 30_000);
+      }
+
+      const stats: MispricingStats = {
+        totalMispricings: mispricings.length,
+        averageEdge: mispricings.length > 0
+          ? mispricings.reduce((sum, m) => sum + m.rawEdge, 0) / mispricings.length
+          : 0,
+        bestEdge: mispricings.length > 0
+          ? Math.max(...mispricings.map((m) => m.rawEdge))
+          : 0,
+        totalExploitableVolume: mispricings.reduce((sum, m) => sum + m.volume24h, 0),
+        marketsScanned: mispricings.reduce((sum, m) => sum + m.outcomes.length, 0),
+      };
+      res.json(stats);
     } catch (e: any) {
       res.status(422).json({ error: e.message });
     }

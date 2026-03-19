@@ -3,6 +3,7 @@ import {
   type AlertConfig,
   type MarketInsight,
   type DailyReport,
+  type MispricingOpportunity,
   type InsertWatchlistItem,
   type InsertAlertConfig,
 } from "@shared/schema";
@@ -28,6 +29,10 @@ export interface IStorage {
   getReports(): Promise<DailyReport[]>;
   getLatestReport(): Promise<DailyReport | undefined>;
   saveReport(report: DailyReport): Promise<void>;
+
+  // Mispricings
+  getMispricings(): Promise<MispricingOpportunity[]>;
+  saveMispricings(items: MispricingOpportunity[]): Promise<void>;
 }
 
 export class MemStorage implements IStorage {
@@ -35,6 +40,7 @@ export class MemStorage implements IStorage {
   private alerts: Map<string, AlertConfig> = new Map();
   private insights: MarketInsight[] = [];
   private reports: DailyReport[] = [];
+  private mispricings: MispricingOpportunity[] = [];
 
   async getWatchlist(): Promise<WatchlistItem[]> {
     return Array.from(this.watchlist.values());
@@ -104,6 +110,14 @@ export class MemStorage implements IStorage {
     if (this.reports.length > 30) {
       this.reports = this.reports.slice(-30);
     }
+  }
+
+  async getMispricings(): Promise<MispricingOpportunity[]> {
+    return this.mispricings;
+  }
+
+  async saveMispricings(items: MispricingOpportunity[]): Promise<void> {
+    this.mispricings = items;
   }
 }
 

@@ -4,6 +4,7 @@ import {
   Eye,
   Bell,
   Brain,
+  Crosshair,
   FileText,
   Sun,
   Moon,
@@ -16,6 +17,7 @@ import { PerplexityAttribution } from "@/components/PerplexityAttribution";
 const navItems = [
   { path: "/", label: "Dashboard", icon: LayoutDashboard },
   { path: "/insights", label: "AI Insights", icon: Brain },
+  { path: "/mispricing", label: "Mispricing", icon: Crosshair },
   { path: "/watchlist", label: "Watchlist", icon: Eye },
   { path: "/alerts", label: "Alerts", icon: Bell },
   { path: "/reports", label: "Reports", icon: FileText },

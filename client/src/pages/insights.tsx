@@ -4,8 +4,9 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Brain, RefreshCw, ArrowUpRight, Shield, AlertTriangle, TrendingUp } from "lucide-react";
-import type { MarketInsight } from "@shared/schema";
+import { Brain, RefreshCw, ArrowUpRight, Shield, AlertTriangle, TrendingUp, Crosshair, ExternalLink } from "lucide-react";
+import { Link } from "wouter";
+import type { MarketInsight, MispricingOpportunity } from "@shared/schema";
 
 function SignalBadge({ signal }: { signal: MarketInsight["signal"] }) {
   const config = {
@@ -85,6 +86,89 @@ function InsightCard({ insight }: { insight: MarketInsight }) {
   );
 }
 
+function MispricingAlerts() {
+  const { data: mispricings } = useQuery<MispricingOpportunity[]>({
+    queryKey: ["/api/mispricings"],
+    staleTime: 30_000,
+  });
+
+  const top3 = (mispricings || []).slice(0, 3);
+
+  if (top3.length === 0) return null;
+
+  return (
+    <Card data-testid="mispricing-alerts-section">
+      <CardContent className="p-4">
+        <div className="flex items-center justify-between mb-3">
+          <div className="flex items-center gap-2">
+            <div className="p-1.5 rounded-md bg-primary/10">
+              <Crosshair className="w-3.5 h-3.5 text-primary" />
+            </div>
+            <h3 className="text-sm font-semibold">Mispricing Alerts</h3>
+            <Badge variant="secondary" className="text-[10px]">
+              {mispricings?.length || 0} total
+            </Badge>
+          </div>
+          <Link href="/mispricing">
+            <span
+              className="text-xs text-primary hover:underline cursor-pointer flex items-center gap-1"
+              data-testid="link-view-all-mispricings"
+            >
+              View All
+              <ExternalLink className="w-3 h-3" />
+            </span>
+          </Link>
+        </div>
+        <div className="space-y-2">
+          {top3.map((m) => (
+            <div
+              key={m.id}
+              data-testid={`mispricing-alert-${m.id}`}
+              className="flex items-center justify-between py-1.5 px-2 rounded-md bg-muted/50 text-xs"
+            >
+              <div className="flex items-center gap-2 min-w-0 flex-1">
+                <span
+                  className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold ${
+                    m.type === "probability_sum"
+                      ? "bg-primary/10 text-primary"
+                      : "bg-[hsl(var(--chart-2))]/10 text-[hsl(var(--chart-2))]"
+                  }`}
+                >
+                  {m.type === "probability_sum" ? "P-Sum" : "Binary"}
+                </span>
+                <a
+                  href={m.polymarketUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-foreground hover:text-primary transition-colors truncate"
+                >
+                  {m.eventTitle}
+                </a>
+              </div>
+              <div className="flex items-center gap-3 shrink-0">
+                <span
+                  className={`font-semibold tabular-nums ${
+                    m.rawEdge >= 0.05
+                      ? "text-[hsl(var(--color-gain))]"
+                      : m.rawEdge >= 0.02
+                        ? "text-[hsl(var(--chart-4))]"
+                        : "text-muted-foreground"
+                  }`}
+                >
+                  {(Number(m.rawEdge) * 100).toFixed(2)}%
+                </span>
+                <span className="text-muted-foreground tabular-nums">
+                  Σ{Number(m.probabilitySum).toFixed(3)}
+                </span>
+              </div>
+            </div>
+          ))}
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
 export default function Insights() {
   const { data: insights, isLoading } = useQuery<MarketInsight[]>({
     queryKey: ["/api/insights"],
@@ -132,6 +216,9 @@ export default function Insights() {
           Refresh
         </Button>
       </div>
+
+      {/* Mispricing Alerts */}
+      <MispricingAlerts />
 
       {/* Summary stats */}
       <div className="grid grid-cols-3 gap-4">

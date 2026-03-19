@@ -10,6 +10,7 @@ import Watchlist from "@/pages/watchlist";
 import Alerts from "@/pages/alerts";
 import Insights from "@/pages/insights";
 import Reports from "@/pages/reports";
+import Mispricing from "@/pages/mispricing";
 import AppLayout from "@/components/app-layout";
 import { ThemeProvider } from "@/components/theme-provider";
 
@@ -21,6 +22,7 @@ function AppRouter() {
         <Route path="/watchlist" component={Watchlist} />
         <Route path="/alerts" component={Alerts} />
         <Route path="/insights" component={Insights} />
+        <Route path="/mispricing" component={Mispricing} />
         <Route path="/reports" component={Reports} />
         <Route component={NotFound} />
       </Switch>

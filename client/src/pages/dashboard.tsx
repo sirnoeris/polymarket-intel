@@ -12,8 +12,9 @@ import {
   ArrowUpRight,
   ArrowDownRight,
   Minus,
+  Crosshair,
 } from "lucide-react";
-import type { PolymarketEvent, PolymarketMarket } from "@shared/schema";
+import type { PolymarketEvent, PolymarketMarket, MispricingStats } from "@shared/schema";
 
 function formatNumber(n: number): string {
   if (n >= 1_000_000) return `$${(n / 1_000_000).toFixed(1)}M`;
@@ -234,6 +235,12 @@ export default function Dashboard() {
     refetchInterval: 120_000,
   });
 
+  const { data: mispricingStats } = useQuery<MispricingStats>({
+    queryKey: ["/api/mispricings/stats"],
+    staleTime: 60_000,
+    refetchInterval: 120_000,
+  });
+
   return (
     <div className="p-6 space-y-6 max-w-[1400px]">
       <div>
@@ -244,9 +251,9 @@ export default function Dashboard() {
       </div>
 
       {/* KPI Cards */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
         {statsLoading ? (
-          [...Array(4)].map((_, i) => (
+          [...Array(5)].map((_, i) => (
             <Card key={i}>
               <CardContent className="p-4">
                 <Skeleton className="h-16 w-full" />
@@ -286,6 +293,16 @@ export default function Dashboard() {
                 stats?.biggestMover?.question
                   ? stats.biggestMover.question.slice(0, 28) + "..."
                   : undefined
+              }
+            />
+            <KPICard
+              label="Active Mispricings"
+              value={String(mispricingStats?.totalMispricings || 0)}
+              icon={Crosshair}
+              delta={
+                mispricingStats?.bestEdge
+                  ? `Best edge ≈ ${(Number(mispricingStats.bestEdge) * 100).toFixed(1)}%`
+                  : "Scan to detect"
               }
             />
           </>
