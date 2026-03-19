@@ -284,7 +284,7 @@ export default function Dashboard() {
               icon={stats?.biggestMover?.change && stats.biggestMover.change > 0 ? TrendingUp : TrendingDown}
               delta={
                 stats?.biggestMover?.question
-                  ? stats.biggestMover.question.slice(0, 40) + "..."
+                  ? stats.biggestMover.question.slice(0, 28) + "..."
                   : undefined
               }
             />
