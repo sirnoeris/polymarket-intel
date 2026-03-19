@@ -77,6 +77,7 @@ export interface MarketInsight {
   id: string;
   eventId: string;
   eventTitle: string;
+  eventSlug?: string;
   marketId: string;
   marketQuestion: string;
   currentProbability: number;

@@ -550,6 +550,7 @@ function analyzeMarket(event: PolymarketEvent, market: PolymarketMarket): Market
     id: randomUUID(),
     eventId: event.id,
     eventTitle: event.title,
+    eventSlug: event.slug,
     marketId: market.id,
     marketQuestion: market.question,
     currentProbability: yesPrice,

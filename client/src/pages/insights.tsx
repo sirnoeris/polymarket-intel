@@ -39,18 +39,37 @@ function ConfidenceBar({ value }: { value: number }) {
   );
 }
 
+function polymarketUrl(insight: MarketInsight): string | undefined {
+  if (insight.eventSlug) return `https://polymarket.com/event/${insight.eventSlug}`;
+  return undefined;
+}
+
 function InsightCard({ insight }: { insight: MarketInsight }) {
+  const url = polymarketUrl(insight);
   return (
-    <Card data-testid={`insight-${insight.id}`}>
+    <Card data-testid={`insight-${insight.id}`} className="group">
       <CardContent className="p-4 space-y-3">
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
             <p className="text-xs text-muted-foreground truncate">
               {insight.eventTitle}
             </p>
-            <p className="text-sm font-medium mt-0.5 leading-snug">
-              {insight.marketQuestion}
-            </p>
+            {url ? (
+              <a
+                href={url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-sm font-medium mt-0.5 leading-snug hover:text-primary transition-colors inline-flex items-center gap-1"
+                data-testid={`link-insight-${insight.id}`}
+              >
+                {insight.marketQuestion}
+                <ExternalLink className="w-3 h-3 shrink-0 opacity-0 group-hover:opacity-60 transition-opacity" />
+              </a>
+            ) : (
+              <p className="text-sm font-medium mt-0.5 leading-snug">
+                {insight.marketQuestion}
+              </p>
+            )}
           </div>
           <SignalBadge signal={insight.signal} />
         </div>
