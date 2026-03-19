@@ -4,7 +4,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Brain, RefreshCw, ArrowUpRight, Shield, AlertTriangle, TrendingUp, Crosshair, ExternalLink } from "lucide-react";
+import { Brain, RefreshCw, ArrowUpRight, Shield, AlertTriangle, TrendingUp, Crosshair, ExternalLink, DollarSign } from "lucide-react";
 import { Link } from "wouter";
 import type { MarketInsight, MispricingOpportunity } from "@shared/schema";
 
@@ -86,6 +86,34 @@ function InsightCard({ insight }: { insight: MarketInsight }) {
             <ConfidenceBar value={insight.confidence} />
           </div>
         </div>
+
+        {/* Payout stats — only show when there's meaningful upside (ROI > 0, price < 0.98) */}
+        {insight.yesPrice > 0.01 && insight.yesPrice < 0.98 && insight.roiPercent > 0 && (
+          <div className="rounded-md bg-muted/50 p-2.5 space-y-1.5">
+            <div className="flex items-center gap-1.5 mb-1">
+              <DollarSign className="w-3 h-3 text-[hsl(var(--color-gain))]" />
+              <span className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">If Yes wins</span>
+            </div>
+            <div className="flex items-center justify-between text-xs">
+              <span className="text-muted-foreground">$100 bet pays</span>
+              <span className="font-semibold tabular-nums text-[hsl(var(--color-gain))]">
+                ${insight.payoutMultiplier ? (100 * insight.payoutMultiplier).toFixed(0) : "—"}
+              </span>
+            </div>
+            <div className="flex items-center justify-between text-xs">
+              <span className="text-muted-foreground">ROI</span>
+              <span className="font-semibold tabular-nums text-[hsl(var(--color-gain))]">
+                +{insight.roiPercent}%
+              </span>
+            </div>
+            <div className="flex items-center justify-between text-xs">
+              <span className="text-muted-foreground">Share price</span>
+              <span className="tabular-nums">
+                Yes ${insight.yesPrice?.toFixed(2)} · No ${insight.noPrice?.toFixed(2)}
+              </span>
+            </div>
+          </div>
+        )}
 
         <div className="text-xs text-muted-foreground leading-relaxed">
           {insight.reasoning}

@@ -86,6 +86,13 @@ export interface MarketInsight {
   reasoning: string;
   factors: string[];
   timestamp: string;
+
+  // Payout stats
+  yesPrice: number;       // Current yes share price (e.g. 0.38)
+  noPrice: number;        // Current no share price (e.g. 0.62)
+  payoutMultiplier: number; // 1 / yesPrice (e.g. 2.63x)
+  roiPercent: number;     // (payout - cost) / cost * 100 (e.g. 163%)
+  impliedProb: number;    // Same as yesPrice, explicit for clarity
 }
 
 export interface DailyReport {

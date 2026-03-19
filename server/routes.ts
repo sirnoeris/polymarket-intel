@@ -502,8 +502,10 @@ function analyzeMarket(event: PolymarketEvent, market: PolymarketMarket): Market
   const parsed = parseOutcomes(market);
   if (parsed.length === 0) return null;
 
-  const yesPrice = parsed.find((p: any) => p.name === "Yes")?.price ??
-    parsed[0]?.price ?? 0;
+  const yesOutcome = parsed.find((p: any) => p.name === "Yes");
+  const noOutcome = parsed.find((p: any) => p.name === "No");
+  const yesPrice = yesOutcome?.price ?? parsed[0]?.price ?? 0;
+  const noPrice = noOutcome?.price ?? (1 - yesPrice);
 
   const dayChange = market.oneDayPriceChange || 0;
   const weekChange = market.oneWeekPriceChange || 0;
@@ -546,6 +548,10 @@ function analyzeMarket(event: PolymarketEvent, market: PolymarketMarket): Market
     ? factors.join(". ") + "."
     : "Neutral market with no strong signals.";
 
+  // Payout calculations
+  const payoutMultiplier = yesPrice > 0 ? 1 / yesPrice : 0;
+  const roiPercent = yesPrice > 0 ? ((1 - yesPrice) / yesPrice) * 100 : 0;
+
   return {
     id: randomUUID(),
     eventId: event.id,
@@ -559,6 +565,11 @@ function analyzeMarket(event: PolymarketEvent, market: PolymarketMarket): Market
     reasoning,
     factors,
     timestamp: new Date().toISOString(),
+    yesPrice,
+    noPrice,
+    payoutMultiplier: Math.round(payoutMultiplier * 100) / 100,
+    roiPercent: Math.round(roiPercent),
+    impliedProb: yesPrice,
   };
 }
 
